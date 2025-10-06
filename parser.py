@@ -6,16 +6,23 @@ import re
 
 
 class Parser:
+    # Регулярное выражение для внутренней метки времени формата: [dd.mm.yy hh:mm:ss]
     INTERNAL_TIMESTAMP = re.compile(r"\[(\d{2})\.(\d{2})\.(\d{2}) (\d{2}:\d{2}:\d{2})]")
 
+    # Регулярное выражение для строки подключения клиента
+    # Пример: "... Incoming Conn{db20bbd} on 10.205.6.128:39462 accepted, 2 of 500"
     CONNECTION = re.compile(
         r".*?Incoming Conn\{(?P<conn_hex_id>[0-9a-f]+)} on (?P<raw_ip_port>\S+) accepted, "
         r"(?P<open_connections>\d+) of (?P<limit>\d+)"
     )
+    # Регулярное выражение для строки нового запроса
+    # Пример: "... On Conn{db20bbd} new Query{081ad910} [3768519]: синемаскоп"
     NEW_QUERY = re.compile(
         r".*?On Conn\{(?P<conn_hex_id>[0-9a-f]+)} new Query\{(?P<query_hex_id>[0-9a-f]+)} "
         r"\[(?P<query_id>\d+)]: (?P<text_decoded>.+)"
     )
+    # Регулярное выражение для строки завершения запроса
+    # Пример: "... End Query{081ad910} [3768519], done, spent { 0.232496 : 0.018137 queue, 0.21036 work } ms, 21 bytes"
     END = re.compile(
         r".*?End Query\{(?P<query_hex_id>[0-9a-f]+)} \[(?P<query_id>\d+)], (?P<status>\w+),\s"
         r"spent \{ (?P<time_total_ms>[\d.]+) : (?P<time_in_queue_ms>[\d.]+) queue, "
@@ -25,13 +32,13 @@ class Parser:
     def __init__(self, file_path: Path):
         self.path = file_path
 
-        self.connections: Dict[str, str] = {}
+        self.connection_to_ip: Dict[str, str] = {}
         self.query_to_ip: Dict[int, str] = {}
 
         self.request_freq: Dict[str, int] = {}
         self.total_words: int = 0
 
-        self.all_ips: Set[str] = set()
+        self.valid_ips: Set[str] = set()
         self.invalid_ips: Set[str] = set()
 
         self.first_end_time: Optional[datetime] = None
@@ -46,6 +53,9 @@ class Parser:
         self.finished_query_ids: Set[int] = set()
 
     def parse(self):
+        """
+        Построчное чтение и парсинг строк лога
+        """
         with self.path.open("r", encoding="utf-8") as f:
             for line in f:
                 line = line.rstrip("\n")
@@ -58,6 +68,10 @@ class Parser:
                     continue
 
     def _parse_connection(self, line: str) -> bool:
+        """
+        Парсер строки подключения
+        Извлекает ID (hex) подключения и IP-адрес клиента
+        """
         match = self.CONNECTION.search(line)
         if not match:
             return False
@@ -65,14 +79,18 @@ class Parser:
         raw_ip_port = match.group("raw_ip_port")
         ip = self._extract_ip(raw_ip_port)
         if ip:
-            self.all_ips.add(ip)
-            self.connections[conn_hex_id] = ip
+            self.valid_ips.add(ip)
+            self.connection_to_ip[conn_hex_id] = ip
         else:
             self.invalid_ips.add(raw_ip_port)
-            self.connections[conn_hex_id] = raw_ip_port
+            self.connection_to_ip[conn_hex_id] = raw_ip_port
         return True
 
     def _parse_new_query(self, line: str) -> bool:
+        """
+        Парсер строки нового запроса
+        Пропускает дубликаты (если есть), обновляет частоту запросов (`self.request_freq`) и суммарное количество слов в запросах (`self.total_words`)
+        """
         match = self.NEW_QUERY.search(line)
         if not match:
             return False
@@ -85,7 +103,7 @@ class Parser:
         text_decoded = match.group("text_decoded").strip()
 
         conn_hex_id = match.group("conn_hex_id")
-        ip = self.connections.get(conn_hex_id)
+        ip = self.connection_to_ip.get(conn_hex_id)
         if ip:
             self.query_to_ip[query_id] = ip
 
@@ -96,6 +114,10 @@ class Parser:
         return True
 
     def _parse_end_query(self, line: str) -> bool:
+        """
+        Парсер строки завершения запроса
+        Извлекает времена: обработки запроса, ожидания в очереди, общее время обработки; обновляет максимальное время обработки
+        """
         match = self.END.search(line)
         if not match:
             return False
@@ -126,13 +148,6 @@ class Parser:
 
         return True
 
-    def _extract_internal_timestamp(self, line: str) -> Optional[datetime]:
-        match = self.INTERNAL_TIMESTAMP.search(line)
-        if not match:
-            return None
-        dd, mm, yy, hms = match.groups()
-        return datetime.strptime(f"20{yy}-{mm}-{dd} {hms}", "%Y-%m-%d %H:%M:%S")
-
     def most_popular_request(self) -> Optional[str]:
         if not self.request_freq:
             return None
@@ -160,7 +175,20 @@ class Parser:
             return float(c)
         return c / span
 
+    def _extract_internal_timestamp(self, line: str) -> Optional[datetime]:
+        """
+        Извлекает внутреннюю метку времени формата [dd.mm.yy hh:mm:ss]
+        """
+        match = self.INTERNAL_TIMESTAMP.search(line)
+        if not match:
+            return None
+        dd, mm, yy, hms = match.groups()
+        return datetime.strptime(f"20{yy}-{mm}-{dd} {hms}", "%Y-%m-%d %H:%M:%S")
+
     def _extract_ip(self, raw: str) -> Optional[str]:
+        """
+        Пытается извлечь валидный IPv4 адрес из строки. Если IP невалидный, то возвращает `raw`
+        """
         if ":" in raw:
             ip = raw.split(":", 1)[0]
             if self._is_valid_ipv4(ip):
@@ -172,6 +200,9 @@ class Parser:
 
     @staticmethod
     def _is_valid_ipv4(raw: str) -> bool:
+        """
+        Валидирует IPv4 через `ipaddress.IPv4Address`
+        """
         try:
             IPv4Address(raw)
             return True

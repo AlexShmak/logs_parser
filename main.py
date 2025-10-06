@@ -12,7 +12,7 @@ def main():
     parser.parse()
 
     # IPs
-    print("Все клиенты сервиса (IP-адреса):", parser.all_ips, "\nКоличество валидных IP-адресов:", len(parser.all_ips))
+    print("Все клиенты сервиса (IP-адреса):", parser.valid_ips, "\nКоличество валидных IP-адресов:", len(parser.valid_ips))
     invalid_ips = set()
     ports = set()
     for ip in parser.invalid_ips:
@@ -49,3 +49,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
