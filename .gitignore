@@ -1,0 +1,4 @@
+.venv
+spcd.log.11
+.idea
+__pycache__/
